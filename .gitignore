@@ -1,0 +1,13 @@
+node_modules/
+.process_*
+.compile_*
+.compiled_*
+.marp_ready_*
+*.html
+*.pdf
+*.pptx
+assets/
+backups/
+*.bak
+npm-debug.log
+.DS_Store

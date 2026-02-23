@@ -1,0 +1,9 @@
+node_modules
+npm-debug.log
+.process_*
+.compile_*
+*.html
+*.pdf
+*.pptx
+.git
+.DS_Store
