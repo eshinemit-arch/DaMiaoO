@@ -5,8 +5,8 @@ class DaMiaooPreprocessor {
     static REGEX = {
         FRONTMATTER: /^---\r?\n([\s\S]*?)\r?\n---/,
         HEADING: /^(#+)\s+(.+)$/,
-        LAYOUT_TAG: /^\s*@\[([a-zA-Z0-9-]+)\]/m,
-        LAYOUT_DIRECTIVE_GLOBAL: /^\s*@\[([a-zA-Z0-9-]+)\]/gm,
+        LAYOUT_TAG: /^\s*@\[([a-zA-Z0-9-]+)(?::\d+)?\]/m,
+        LAYOUT_DIRECTIVE_GLOBAL: /^\s*@\[([a-zA-Z0-9-]+)(?::\d+)?\]/gm,
         IMAGE: /!\[.*?\]\(.*?\)/,
         MARP_DECLARATION: /marp: true/,
         HTML_TAGS: /<[^>]*>/g,
@@ -29,7 +29,7 @@ class DaMiaooPreprocessor {
             force: config.force || false,
             thresholds: {
                 default: 250,
-                chapter: 300,
+                chapter: 350,
                 cover: 300,
                 split: 400,
                 quote: 400,
@@ -409,20 +409,22 @@ class DaMiaooPreprocessor {
         const entries = [];
         const r2Regex = new RegExp(`^[ \t]*#{${rank2}}[ \t]+(.+)$`, 'm');
 
+        let chapterIndex = 1;
         slides.forEach(slide => {
             if (slide.match(/^\s*@\[(front|back|toc)\]/m)) return;
             const m = slide.match(r2Regex);
             if (m) {
-                const { clean, index } = this.normalizeHeadingText(m[1].trim());
+                const { clean } = this.normalizeHeadingText(m[1].trim());
                 let text = clean;
 
                 if (text.length > 18) {
                     text = text.substring(0, 18) + '...';
-                    console.log(`[!] 标题警告：章节标题 [${clean}] 已截断为 [${text}]`);
+                    console.log(`[!] 标题警告：目录摘要已将 [${clean}] 截断为 [${text}]`);
                 }
 
-                // 使用无序列表语法，由 CSS 计数器接管编号显示
-                entries.push(`- ${text}`);
+                // 使用有序列表语法
+                entries.push(`${chapterIndex}. ${text}`);
+                chapterIndex++;
             }
         });
         return entries;
