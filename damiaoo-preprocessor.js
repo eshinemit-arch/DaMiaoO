@@ -29,11 +29,11 @@ class DaMiaooPreprocessor {
             force: config.force || false,
             thresholds: {
                 default: 250,
-                chapter: 150,
-                cover: 150,
-                split: 180,
-                quote: 180,
-                cols: 350,
+                chapter: 300,
+                cover: 300,
+                split: 400,
+                quote: 400,
+                cols: 450,
                 toc: 2000
             }
         };
@@ -52,12 +52,13 @@ class DaMiaooPreprocessor {
             const ranks = this.analyzeGlobalHierarchy(body);
             this.ranks = ranks;
 
-            // 阶段 3：全局架构预切片 (Physical Pagination)
-            const paginatedBody = this.applyPageSplitting(body, ranks);
-            let slides = this.splitIntoSlides(paginatedBody);
+            // 阶段 3：文档引言自动剥离 (Preamble Stripping)
+            // 理由：首个 Rank 1 及其配套说明属于文档级信息，在 PPT 中已被 Cover 覆盖，应滤除以保持开门见山。
+            let processedBody = this.stripDocumentPreamble(body, ranks);
 
-            // 阶段 4：智能语义解析 (补充 Meta 数据)
-            this.extractSmartTitle(slides, ranks);
+            // 阶段 4：全局架构预切片 (Physical Pagination)
+            const paginatedBody = this.applyPageSplitting(processedBody, ranks);
+            let slides = this.splitIntoSlides(paginatedBody);
 
             // 阶段 5：架构地标锁定 (TOC & Chapters)
             this.sections = this.scanTOCEntries(slides, ranks.rank2);
@@ -77,7 +78,22 @@ class DaMiaooPreprocessor {
 
             // 阶段 7：构建并输出最终资产
             const outputBody = processedSlides.map(s => s.trim()).filter(Boolean).join('\n\n---\n\n');
-            const finalContent = `${frontmatter}\n\n${outputBody}`;
+
+            // [优化] 重新构造 Frontmatter 展现提取后的 Title
+            let fmLines = frontmatter.split('\n');
+            if (!frontmatter.includes('title:')) {
+                const pagIdx = fmLines.findIndex(l => l.includes('paginate: true'));
+                const insertIdx = pagIdx !== -1 ? pagIdx + 1 : 2;
+                fmLines.splice(insertIdx, 0, `title: ${this.meta.title}`);
+            } else {
+                fmLines = fmLines.map(line => {
+                    if (line.startsWith('title:')) return `title: ${this.meta.title}`;
+                    return line;
+                });
+            }
+            const updatedFM = fmLines.join('\n');
+
+            const finalContent = `${updatedFM}\n\n${outputBody}`;
             fs.writeFileSync(this.outputFile, finalContent, 'utf-8');
             console.log(`\n[✅] Markdown 预处理通过。中间件生成成功: ${path.basename(this.outputFile)}`);
 
@@ -97,20 +113,42 @@ class DaMiaooPreprocessor {
     }
 
     /**
-     * 根据 Rank 1 智能补全演讲主题
+     * 文档引言自动滤除系统：
+     * 自动识别第一个 Rank 1 标题并剥离其后的说明文字，避免在 PPT 中产生冗余首页。
      */
-    extractSmartTitle(slides, ranks) {
-        if (this.meta.title !== 'DaMiaoo 文稿' && this.meta.title) return;
+    stripDocumentPreamble(body, ranks) {
+        const lines = body.split(/\r?\n/);
+        const rank1Regex = new RegExp(`^#{${ranks.rank1}}\\s+(.+)$`);
 
-        const rank1Regex = new RegExp(`^#{${ranks.rank1}}\\s+(.+)$`, 'm');
-        for (const slide of slides) {
-            const match = slide.match(rank1Regex);
-            if (match) {
-                this.meta.title = match[1].trim();
-                console.log(`[*] 智能语义：从首个 Rank 1 触发元数据提取 -> [${this.meta.title}]`);
-                break;
+        let startIdx = -1;
+        let endIdx = -1;
+
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
+            const match = line.match(rank1Regex);
+            if (match && startIdx === -1) {
+                startIdx = i;
+                const title = match[1].trim();
+                if (this.meta.title === 'DaMiaoo 文稿' || !this.meta.title) {
+                    this.meta.title = title;
+                    console.log(`[*] 智能语义：从首个 Rank 1 提取标题 [${title}]，并自动滤除文档级引言。`);
+                }
+            } else if (startIdx !== -1) {
+                // 命中下一个层级标题或手动分页符，代表引言结束
+                if (line.match(/^#+/) || line.startsWith('---')) {
+                    endIdx = i;
+                    break;
+                }
             }
         }
+
+        if (startIdx !== -1) {
+            const before = lines.slice(0, startIdx);
+            const after = endIdx !== -1 ? lines.slice(endIdx) : [];
+            // 合并并清理前后的空行
+            return [...before, ...after].join('\n').trim();
+        }
+        return body;
     }
 
     /**
@@ -287,15 +325,24 @@ class DaMiaooPreprocessor {
         const lines = body.split(/\r?\n/);
         const result = [];
         let isBeginning = true;
-        let inLayoutBlock = false;
+        let inCodeBlock = false;
 
         const structuralLevels = [ranks.rank1, ranks.rank2, ranks.rank3];
 
         for (const line of lines) {
+            // [修复] 代码块保护
+            if (line.match(/^```/)) {
+                inCodeBlock = !inCodeBlock;
+                result.push(line);
+                continue;
+            }
+            if (inCodeBlock) {
+                result.push(line);
+                continue;
+            }
+
             const hMatch = line.match(DaMiaooPreprocessor.REGEX.HEADING);
             const lMatch = line.match(DaMiaooPreprocessor.REGEX.LAYOUT_TAG);
-
-            if (line.trim().startsWith('---') || !!lMatch) inLayoutBlock = false;
 
             const isLayoutTrigger = !!lMatch;
             const isHeadingTrigger = hMatch && structuralLevels.includes(hMatch[1].length);
@@ -312,22 +359,34 @@ class DaMiaooPreprocessor {
 
                 const isHeadingFollowingLayout = isHeadingTrigger && DaMiaooPreprocessor.REGEX.LAYOUT_TAG.test(lastSignificant);
 
-                if (!lastSignificant.startsWith('---') && !isHeadingFollowingLayout) {
+                if (lastSignificant && !lastSignificant.startsWith('---') && !isHeadingFollowingLayout) {
                     result.push('---');
-                    inLayoutBlock = false;
                 }
             }
 
-            if (lMatch) inLayoutBlock = true;
             if (line.trim() && !line.startsWith('---')) isBeginning = false;
-
             result.push(line);
         }
         return result.join('\n');
     }
 
     splitIntoSlides(body) {
-        return body.split(/^---\s*$/gm).map(s => s.trim()).filter(s => s.length > 0);
+        const slides = [];
+        const lines = body.split(/\r?\n/);
+        let currentSlide = [];
+        let inCodeBlock = false;
+
+        for (const line of lines) {
+            if (line.match(/^```/)) inCodeBlock = !inCodeBlock;
+            if (line.match(/^---\s*$/) && !inCodeBlock) {
+                if (currentSlide.length > 0) slides.push(currentSlide.join('\n'));
+                currentSlide = [];
+            } else {
+                currentSlide.push(line);
+            }
+        }
+        if (currentSlide.length > 0) slides.push(currentSlide.join('\n'));
+        return slides.map(s => s.trim()).filter(Boolean);
     }
 
     ensurePage(slides, tag, position = 'end') {
@@ -348,7 +407,7 @@ class DaMiaooPreprocessor {
 
     scanTOCEntries(slides, rank2) {
         const entries = [];
-        const r2Regex = new RegExp(`^\\s*#{${rank2}}\\s+(.+)$`, 'm');
+        const r2Regex = new RegExp(`^[ \t]*#{${rank2}}[ \t]+(.+)$`, 'm');
 
         slides.forEach(slide => {
             if (slide.match(/^\s*@\[(front|back|toc)\]/m)) return;
@@ -362,9 +421,8 @@ class DaMiaooPreprocessor {
                     console.log(`[!] 标题警告：章节标题 [${clean}] 已截断为 [${text}]`);
                 }
 
-                // 统一编码语义：即使原始写法各异，目录输出也归一化为 "1. 标题"
-                // 这里我们使用 entries.length + 1 作为基准序列
-                entries.push(`${entries.length + 1}. ${text}`);
+                // 使用无序列表语法，由 CSS 计数器接管编号显示
+                entries.push(`- ${text}`);
             }
         });
         return entries;
@@ -374,13 +432,23 @@ class DaMiaooPreprocessor {
         // [语义保护] 封面、封底和目录拥有独立渲染引擎，不介入通用提权
         if (slide.match(/^\s*@\[(front|back|toc)\]/m)) return slide;
 
-        const matches = slide.match(/^#+/gm) || [];
+        // [核心优化] 预处理代码块：提权引擎应无视代码块内部的 # 符号 (如 Bash 注释)
+        // 否则会导致页内级别计算错误，进而产生 ## 标题。
+        const noCodeText = slide.replace(/```[\s\S]*?```/g, '');
+        const matches = noCodeText.match(/^#+/gm) || [];
         if (matches.length === 0) return slide;
 
         const levels = [...new Set(matches.map(h => h.length))].sort((a, b) => a - b);
         const [l1, l2, l3] = [levels[0], levels[1], levels[2]];
 
+        let inCodeBlock = false;
         return slide.split(/\r?\n/).map(line => {
+            if (line.trim().startsWith('```')) {
+                inCodeBlock = !inCodeBlock;
+                return line;
+            }
+            if (inCodeBlock) return line;
+
             const m = line.match(DaMiaooPreprocessor.REGEX.HEADING);
             if (!m) return line;
 
@@ -429,28 +497,41 @@ class DaMiaooPreprocessor {
      * 识别页面内的混合结构（如表格+引用），并根据内容密度强制拆分。
      */
     autoPaginateDefaultBody(slide) {
-        // 如果已经有原子布局标签，且不是 @[chapter]，则不执行自动结构拆分
-        // 允许 @[chapter] 进入分页逻辑，因为它是可衍生版式
         const atomicLayouts = /@\[(split|quote|metric|focus|cards|cols\d)\]/;
         if (slide.match(atomicLayouts)) return slide;
 
-        const cleanContent = slide.replace(DaMiaooPreprocessor.REGEX.COMMENTS, '')
-            .replace(DaMiaooPreprocessor.REGEX.HTML_TAGS, '')
-            .replace(/^#.*/gm, '').trim();
+        // [修复] 分段逻辑需保护代码块，避免在代码块内部切分
+        const lines = slide.split(/\r?\n/);
+        const paragraphs = [];
+        let currentP = [];
+        let inCodeBlock = false;
 
-        const paragraphs = slide.split(/\n\s*\n/);
+        for (const line of lines) {
+            if (line.match(/^```/)) inCodeBlock = !inCodeBlock;
+            if (line.trim() === '' && !inCodeBlock) {
+                if (currentP.length > 0) {
+                    paragraphs.push(currentP.join('\n'));
+                    currentP = [];
+                }
+            } else {
+                currentP.push(line);
+            }
+        }
+        if (currentP.length > 0) paragraphs.push(currentP.join('\n'));
+
         if (paragraphs.length <= 1) return slide;
 
         const subSlides = [];
         let currentBuffer = [];
         let currentLen = 0;
 
-        // 混合结构识别：表格、引用、列表
-        const isStructured = (p) => /^\s*\|/m.test(p) || /^\s*>/m.test(p) || DaMiaooPreprocessor.REGEX.ANY_LIST_ITEM.test(p);
+        const isStructured = (p) => p.includes('```') || /^\s*\|/m.test(p) || /^\s*>/m.test(p) || DaMiaooPreprocessor.REGEX.ANY_LIST_ITEM.test(p);
 
         paragraphs.forEach((p, idx) => {
             const pLen = p.trim().length;
-            const hasStructuralBreak = isStructured(p) && currentBuffer.length > 0 && (currentLen > 80 || isStructured(currentBuffer[currentBuffer.length - 1]));
+            // [优化] 提高结构化拆分门槛 (从 80 -> 200)
+            // 理由：短文本配合列表是极佳的排版，不应强行拆散导致幻灯片碎片化。
+            const hasStructuralBreak = isStructured(p) && currentBuffer.length > 0 && (currentLen > 200 || isStructured(currentBuffer[currentBuffer.length - 1]));
 
             if ((currentLen + pLen > this.config.thresholds.default || hasStructuralBreak) && currentBuffer.length > 0) {
                 subSlides.push(currentBuffer.join('\n\n'));
@@ -468,20 +549,12 @@ class DaMiaooPreprocessor {
         const headerMatch = slide.match(/^(#+)\s+(.+)$/m);
         if (headerMatch) {
             const hText = headerMatch[2];
-            const isLandmark = /^(第.+[章节]|Chapter\s*\d+|Part\s*\d+|Module\s*\d+|附录|总结|答疑|致谢|鸣谢|Appendix|Conclusion|Q\s*&\s*A)/i.test(hText);
-
-            if (isLandmark) {
-                console.log(`\n[!] 结构预警：地标页面 [${hText}] 内容密度过载，已强制降级并分页。`);
-                console.log(`    建议：地标/章节页应保持纯净。请考虑将详细文案移动至下方的新幻灯片中。`);
-            } else {
-                console.log(`[!] 结构优化：检测到 Slide #${subSlides.length > 1 ? '?' : ''} 存在混合排版结构，已自动拆分为 ${subSlides.length} 页。`);
-            }
+            console.log(`[!] 结构优化：检测到 Slide #${subSlides.length > 1 ? '?' : ''} 存在混合排版结构，已自动拆分为 ${subSlides.length} 页。`);
 
             const hPrefix = headerMatch[1];
             return subSlides.map((s, i) => {
                 if (i === 0) return s;
                 if (s.startsWith(hPrefix)) return s;
-                // 确保只添加一个 (续)，不重复追加
                 const cleanTitle = hText.replace(/\s*\(续\)$/, '');
                 return `${hPrefix} ${cleanTitle} (续)\n\n${s}`;
             }).join('\n---\n');
@@ -495,12 +568,14 @@ class DaMiaooPreprocessor {
      * 根据内容结构自动匹配最合适的版式，实现“零标记”排版。
      */
     inferLayout(slide) {
-        const hasExplicit = slide.includes('@[') || slide.includes('_class:');
+        // [优化] 更加精准的显式声明检测
+        // 理由：正文中包含 @[xxx] 字样（如教程）时不应视为已手动指定版式
+        const hasExplicit = DaMiaooPreprocessor.REGEX.LAYOUT_TAG.test(slide) || slide.includes('_class:');
         if (hasExplicit) return slide;
 
         const cleanBody = slide.replace(DaMiaooPreprocessor.REGEX.COMMENTS, '').trim();
         const lines = cleanBody.split('\n');
-        const hMatch = slide.match(/^\s*#\s+(.+)$/m);
+        const hMatch = slide.match(/^\s*(#+)\s+(.+)$/m); // [优化] 支持任意层级标题的语义识别
         const hasImage = DaMiaooPreprocessor.REGEX.IMAGE.test(slide);
         const hasQuote = /^\s*>/m.test(slide);
         const listItems = lines.filter(l => DaMiaooPreprocessor.REGEX.ANY_LIST_ITEM.test(l));
@@ -522,9 +597,10 @@ class DaMiaooPreprocessor {
         // 3. [智能推断] 业务网格 (Cols/Cards)
         // 条件：包含 2-6 个列表项，且标题包含特定业务关键词或总字数较少
         if (listItems.length >= 2 && listItems.length <= 6) {
-            const hText = hMatch ? hMatch[1] : "";
-            const keywords = /对比|优势|步骤|模块|核心|特点|环节|路径|案例|要素|维度|一览|方法/i;
-            const isShort = cleanBody.length < 400;
+            const hText = hMatch ? hMatch[2] : "";
+            // [优化] 扩展业务关键词库，提高卡片/分栏版式的智能识别率
+            const keywords = /对比|优势|步骤|模块|核心|特点|环节|路径|案例|要素|维度|一览|方法|语法|结构|基础|说明|参数|功能/i;
+            const isShort = cleanBody.length < 500; // 适度放宽字数门槛
 
             if (keywords.test(hText) || isShort) {
                 const layout = `cols${listItems.length}`;
@@ -539,7 +615,7 @@ class DaMiaooPreprocessor {
         // 条件：标题纯数字、百分比或货币符号，且无其它大量正文
         if (hMatch) {
             // 语义预洗：去除可能的 ** 或 __ 干扰以后进行纯数字判断
-            const hText = hMatch[1].trim().replace(/[*_]/g, '');
+            const hText = hMatch[2].trim().replace(/[*_]/g, '');
             const textOnly = cleanBody.replace(/^#.*$/gm, '').trim();
             if (/^[\d.,%￥$€万亿+-]+$/.test(hText) && textOnly.length < 50) {
                 console.log(`[*] 智能感知：发现核心指标 [${hText}]，自动套用 @[metric]`);
@@ -554,7 +630,7 @@ class DaMiaooPreprocessor {
         // 1. [智能推断] 金句专题 (Quote)
         // 条件：除了标题之外只有少量正文，且不是章节（防止污染预设地标）
         if (hMatch) {
-            const text = hMatch[1].trim();
+            const text = hMatch[2].trim();
             const textOnly = cleanBody.replace(/^#.*$/gm, '').trim();
             if (textOnly.length > 0 && textOnly.length < 120 && !hasImage && !hasQuote) {
                 console.log(`[*] 智能感知：检测到章节内强调页 [${text}]，自动套用 @[focus]`);
@@ -646,7 +722,7 @@ class DaMiaooPreprocessor {
     }
 
     tagInitialLandmarks(slides, rank2) {
-        const landmarkRegex = new RegExp(`^#{${rank2}}\\s+(.+)$`, 'm');
+        const landmarkRegex = new RegExp(`^[ \t]*#{${rank2}}[ \t]+(.+)$`, 'm');
         return slides.map(slide => {
             const hMatch = slide.match(landmarkRegex);
             if (hMatch) {
@@ -655,14 +731,16 @@ class DaMiaooPreprocessor {
 
                 // [2.1 定向归一化] 章节归一化应在锁定章节后立即执行，且仅针对章节标题
                 const { clean } = this.normalizeHeadingText(rawText);
-                let text = clean;
-                if (text.length > 25) text = text.substring(0, 25) + '...';
+                const fullTitle = clean;
+                let displayTitle = fullTitle;
+                if (displayTitle.length > 25) displayTitle = displayTitle.substring(0, 25) + '...';
 
-                // 更新 Slide 内容：将原始 Rank 2 替换为归一化后的标题
-                const updatedSlide = slide.replace(landmarkRegex, `${rawLevel} ${text}`);
+                // 更新 Slide 内容：使用原始完整标题（归一化后）
+                const updatedSlide = slide.replace(landmarkRegex, `${rawLevel} ${fullTitle}`);
 
-                if (!slide.includes('@[')) {
-                    console.log(`[*] 结构锁定：全案 Rank 2 层级确认 -> [${text}]`);
+                const hasExplicitLayout = DaMiaooPreprocessor.REGEX.LAYOUT_TAG.test(updatedSlide);
+                if (!hasExplicitLayout) {
+                    console.log(`[*] 结构锁定：全案 Rank 2 层级确认 -> [${displayTitle}]`);
                     return `@[chapter]\n${updatedSlide}`;
                 }
                 return updatedSlide;
@@ -685,9 +763,13 @@ class DaMiaooPreprocessor {
 
         const match = workingText.match(DaMiaooPreprocessor.REGEX.SECTION_NUMBERING);
         const cleanBody = workingText.replace(DaMiaooPreprocessor.REGEX.SECTION_NUMBERING, '').trim();
-        const finalContent = prefixEmoji ? `${prefixEmoji} ${cleanBody}` : cleanBody;
 
-        if (!match) return { clean: finalContent, index: null };
+        // [修复点] 如果清洗后为空，说明整个标题就是一个编号（如 "Section 1" 或 "第一章"）
+        // 此时我们应该保留原标题，避免 TOC 出现空白或误抓下一行
+        const finalContent = cleanBody || workingText;
+        const result = prefixEmoji ? `${prefixEmoji} ${finalContent}` : finalContent;
+
+        if (!match) return { clean: result, index: null };
 
         const rawPrefix = match[1];
         // 简单转义：识别阿拉伯数字或中文大写数字 (1-10)
@@ -719,9 +801,10 @@ class DaMiaooPreprocessor {
 
         // [语义清洗] 针对 Cards/Cols 版式移除列表项标题后残留的分隔符 (如 : 或 ：)
         // 理由：CSS 会将 strong 标签设为 display: block，此时残存的分隔符会出现在正文首行，影响美观。
+        // [优化] 现在支持更多标题形式：加粗、代码块以及普通短文标题。采用非贪婪匹配确保只切分首个分隔符。
         if (layout.startsWith('cols') || layout === 'cards') {
             listItems = listItems.map(item => {
-                return item.replace(/^(\s*([-*+]|\d+[\.\)])\s+\*\*.+?\*\*\s*)[:：]\s*/, '$1');
+                return item.replace(/^(\s*([-*+]|\d+[\.\)])\s+(?:\*\*.*?\*\*|`.*?`|[^:：\r\n]+?))\s*[:：]\s*/, '$1 ');
             });
             // 立即回流：确保在不触发分页的情况下也能获得清洗后的内容
             text = `${header.trim()}\n\n${listItems.join('\n')}`;
@@ -732,8 +815,12 @@ class DaMiaooPreprocessor {
 
         let dynamicLimit = baseLimit;
         if (layout !== 'toc') {
-            if (avgLen > 100) dynamicLimit = Math.max(1, Math.floor(baseLimit / 3));
-            else if (avgLen > 50) dynamicLimit = Math.max(1, Math.floor(baseLimit / 2));
+            // [优化] 更有弹性的限额算法
+            // 只有当条目数确实较多，且平均长度超过阈值时才严格限制
+            if (avgLen > 150) dynamicLimit = Math.max(1, Math.floor(baseLimit / 2));
+            else if (avgLen > 100 && listItems.length > 3) dynamicLimit = Math.max(2, Math.floor(baseLimit / 1.5));
+            // 兜底：如果只有 2 或 3 个条目，且平均长度没到变态的 150+，则强制不分页
+            if (listItems.length <= 3 && avgLen < 150) dynamicLimit = listItems.length;
         }
 
         if (listItems.length <= dynamicLimit) return text;
@@ -742,19 +829,31 @@ class DaMiaooPreprocessor {
 
         const slides = [];
         for (let i = 0; i < listItems.length; i += dynamicLimit) {
-            const chunk = listItems.slice(i, i + dynamicLimit).join('\n');
-            let slideContent = header;
+            const currentItems = listItems.slice(i, i + dynamicLimit);
+            const chunk = currentItems.join('\n');
+            let slideHeader = header;
+
+            // [核心优化] 动态二次进化逻辑 (Dynamic Layout Evolution)
+            if (layout.startsWith('cols') || layout === 'cards') {
+                let evolvedLayout = layout;
+                const count = currentItems.length;
+                if (count === 1) evolvedLayout = 'cards';
+                else if (count >= 2 && count <= 6) evolvedLayout = `cols${count}`;
+
+                slideHeader = slideHeader.replace(/@\[([a-zA-Z0-9-]+)(?::\d+)?\]/, `@[${evolvedLayout}]`);
+            }
+
+            // 处理 (续) 标题
             if (i > 0) {
-                // 确保只添加一个 (续)，不重复追加
-                slideContent = header.replace(/#\s+(.+?)(?:\s*\(续\))?$/, '# $1 (续)');
+                slideHeader = slideHeader.replace(/#\s+(.+?)(?:\s*\(续\))?$/, '# $1 (续)');
             }
 
-            // 修复点：不再直接注入 <style>，而是使用参数化标签传导给 Compiler
+            // 路径参数传导 (针对 TOC)
             if (layout === 'toc' && i > 0) {
-                slideContent = slideContent.replace(/@\[toc\]/, `@[toc:${i}]`);
+                slideHeader = slideHeader.replace(/@\[toc\]/, `@[toc:${i}]`);
             }
 
-            slides.push(`${slideContent.trim()}\n\n${chunk.trim()}`);
+            slides.push(`${slideHeader.trim()}\n\n${chunk.trim()}`);
         }
         return slides.join('\n---\n');
     }

@@ -97,7 +97,7 @@ section *::after {
 
 /* 覆盖特定无语义大标题底线规则 */
 section:is(.quote, .metric, .toc, .chapter)>h1::after,
-section.cover :is(.author, .date)::after {
+section.cover :is(h2, h3)::after {
   display: none !important;
 }
 
@@ -252,8 +252,8 @@ section.cover {
     linear-gradient(135deg, var(--color-primary) 0%, var(--color-secondary) 100%);
 }
 
-/* 封面主卡片容器 */
-section.cover .title {
+/* 封面主卡片容器 (语义化 H1) */
+section.cover h1 {
   position: relative;
   z-index: 2;
 
@@ -271,7 +271,7 @@ section.cover .title {
 }
 
 /* 主标题视觉下划线 */
-section.cover .title::after {
+section.cover h1::after {
   content: '';
   position: absolute;
   left: 50%;
@@ -285,8 +285,8 @@ section.cover .title::after {
   border-radius: 3px;
 }
 
-/* 封面报告人悬浮胶囊 */
-section.cover .author {
+/* 封面报告人悬浮胶囊 (语义化 H2) */
+section.cover h2 {
   position: relative;
   z-index: 2;
 
@@ -301,8 +301,8 @@ section.cover .author {
   font-weight: 500;
 }
 
-/* 封面时间标识 */
-section.cover .date {
+/* 封面时间标识 (语义化 H3) */
+section.cover h3 {
   margin-top: 0;
   padding-bottom: 40px;
 
@@ -747,7 +747,7 @@ section.toc h1 {
 }
 
 /* 挂载原生 CSS 自动计数器 */
-section.toc ol {
+section.toc :is(ul, ol) {
   display: grid;
   grid-template-columns: 1fr 1fr;
   align-items: stretch;
@@ -760,18 +760,16 @@ section.toc ol {
   counter-reset: toc-counter var(--toc-start, 0);
 }
 
-/* 强视觉浸透磨砂玻璃条目 */
-section.toc ol li {
+/* 强视觉浸透磨砂条目 */
+section.toc :is(ul, ol) li {
   display: flex;
   align-items: center;
 
   min-height: 90px;
   padding: 20px 28px;
 
-  background-color: rgba(255, 255, 255, 0.08);
-  /* 改编原版 background 以兼容扩展 */
-  backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background-color: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: var(--radius-md);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
 

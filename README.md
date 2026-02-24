@@ -1,4 +1,4 @@
-# DaMiaoo Pro Max 演示文稿自动化引擎
+# DaMiaoo Pro Max \\ 演示文稿自动化引擎
 
 DaMiaoo 是一个基于 Markdown 和 Marp 的现代化、自动化的演示文稿（PPT/PDF/HTML）生成系统。它专为追求 **“内容效率”** 与 **“视觉高度”** 完美平衡的用户设计，内置 UI/UX Pro Max 视觉规范，让您只需专注于编写 Markdown 内容，系统将自动把纯文本转化为极具设计感的专业幻灯片。
 
@@ -77,6 +77,8 @@ dm -c .process_presentation.md --pdf
 ```
 
 ## 3. 命令详解
+
+---
 
 `dm` 是 DaMiaoo 的主入口命令，支持以下参数：
 

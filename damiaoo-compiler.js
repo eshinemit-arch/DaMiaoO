@@ -119,42 +119,36 @@ class DaMiaooCompiler {
             let processed = slide.trim();
             if (!processed) return "";
 
-            // A. 处理封面/封底 (自动抽取 metadata 填充，同时也尊重用户输入)
-            if (processed.includes('@[front]') || processed.includes('@[back]')) {
-                const type = processed.includes('@[front]') ? 'front' : 'back';
-                processed = processed.replace(/@\[(front|back)\]/, '').trim();
+            // A. 处理封面/封底 (系统指令，强制触发封面布局)
+            const systemMatch = processed.match(/^[ \t]*@\[(front|back)\][ \t]*$/m);
+            if (systemMatch) {
+                const type = systemMatch[1];
+                processed = processed.replace(/^[ \t]*@\[(front|back)\][ \t]*$/m, '').trim();
 
-                // 检查用户是否自定义了主标题 (#)
-                if (!processed || !processed.match(/^#\s+/m)) {
-                    if (type === 'front') {
-                        processed = `# ${this.meta.title || 'DaMiaoo Doc'}` + (processed ? '\n\n' + processed : '');
-                    } else {
-                        processed = `# ${this.meta.thanks || 'Thanks'}` + (processed ? '\n\n' + processed : '');
-                    }
+                const title = (this.meta.title || 'DaMiaoo Doc').replace(/\\\\/g, '<br>');
+                const author = this.meta.author || '';
+                const date = this.meta.date || '';
+                const thanks = (this.meta.thanks || '感谢您的观看').replace(/\\\\/g, '<br>');
+
+                // 智能元数据补全
+                if (!processed.match(/^#\s+/m)) {
+                    processed = `# ${type === 'front' ? title : thanks}\n${processed}`;
                 }
-
-                // 针对封面：如果用户没写作者 (##)，则自动补全 metadata 中的作者和日期
-                if (type === 'front' && !processed.match(/^##/m)) {
-                    const authorLine = `\n\n## ${this.meta.author || ''}`;
-                    const dateLine = `\n### ${this.meta.date || ''}`;
-                    processed += authorLine + dateLine;
+                if (type === 'front' && !processed.match(/^##\s+/m)) {
+                    processed += `\n\n## ${author}\n### ${date}`;
                 }
-
-                // 翻译 H1, H2, H3 为特定 Class 的 HTML，以便 CSS 渲染
-                processed = processed.replace(/^#\s+(.+)$/m, '<h1 class="title">$1</h1>')
-                    .replace(/^##\s+(.+)$/m, '<h2 class="author">$1</h2>')
-                    .replace(/^###\s+(.+)$/m, '<h3 class="date">$1</h3>');
 
                 return `<!-- _class: cover -->\n\n${processed}`;
             }
 
-            // B. 处理通用布局标签
-            processed = processed.replace(/@\[([a-zA-Z0-9-]+)(?::(\d+))?\]/g, (match, layout, param) => {
-                let html = `<!-- _class: ${layout} -->`;
-                if (layout === 'toc' && param) {
-                    html += `\n<style scoped> section.toc ol { counter-reset: toc-counter ${param}; } </style>`;
+            // B. 处理通用布局标签 (通过 replace 归一化为 Marp 指令)
+            processed = processed.replace(/^[ \t]*@\[([a-zA-Z0-9-]+)(?::(\d+))?\][ \t]*$/gm, (match, layout, param) => {
+                let directive = `<!-- _class: ${layout} -->`;
+                if (layout === 'toc' && param !== undefined) {
+                    // [优化] 使用 Marp 内联样式指令而非原始 HTML 标签，使中间件更整洁
+                    directive += `\n<!-- _style: "section.toc :is(ul, ol) { counter-reset: toc-counter ${param}; }" -->`;
                 }
-                return html;
+                return directive;
             });
 
             return processed;
