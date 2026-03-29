@@ -109,12 +109,20 @@ class DaMiaooCompiler {
     }
 
     scanSections(content) {
-        const lines = content.split('\n');
+        // [防御] 剔除开头的元数据区块，防止其干扰页码计数
+        const cleanContent = content.replace(/^---[\s\S]+?---/, '').trim();
+        const slides = cleanContent.split(/^---\s*$/gm);
         const sections = [];
-        // 查找所有二级标题作为目录项
-        const r2Regex = /^[ \t]*##[ \t]+(.+)$/;
-        lines.forEach(line => {
-            const match = line.match(r2Regex);
+
+        // 按 Slide 扫描，只从章节页提取 H1 标题
+        slides.forEach(slide => {
+            const s = slide.trim();
+            // 排除封面、目录页、封底页
+            if (s.includes('@[front]') || s.includes('@[toc]') || s.includes('@[back]') || 
+                s.includes('_class: cover') || s.includes('_class: toc')) return;
+            
+            // 匹配一级标题作为章节目录项
+            const match = s.match(/^[ \t]*#[ \t]+(.+)$/m);
             if (match) {
                 sections.push(this.stripMarkdown(match[1].trim()));
             }
