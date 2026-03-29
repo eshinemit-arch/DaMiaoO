@@ -20,6 +20,7 @@ class DaMiaooCompiler {
         }
 
         this.meta = meta;
+        this.sections = [];
         this.config = {
             format: config.format || 'pptx' // can be pdf, html, pptx
         };
@@ -38,7 +39,11 @@ class DaMiaooCompiler {
             }
 
             const marpContent = this.translateToMarp(rawContent);
-            fs.writeFileSync(tempMarpFile, marpContent, 'utf-8');
+            this.sections = this.scanSections(marpContent);
+
+            // 再次翻译以应用 TOC 内容 (如果需要)
+            const finalMarpContent = this.translateToMarp(rawContent, true);
+            fs.writeFileSync(tempMarpFile, finalMarpContent, 'utf-8');
 
             const ext = this.config.format === 'html' ? '.html' : (this.config.format === 'pdf' ? '.pdf' : '.pptx');
             const outputFile = path.join(this.dir, this.rawBaseName + ext);
@@ -80,21 +85,44 @@ class DaMiaooCompiler {
         if (fmMatch) {
             const fm = fmMatch[1];
             const pairs = {
-                title: /^title:\s*["']?(.+?)["']?$/m,
-                author: /^author:\s*["']?(.+?)["']?$/m,
-                date: /^date:\s*["']?(.+?)["']?$/m,
-                thanks: /^thanks:\s*["']?(.+?)["']?$/m,
-                theme: /^theme:\s*["']?(.+?)["']?$/m
+                title: /^title[:：]\s*["']?(.+?)["']?$/m,
+                author: /^author[:：]\s*["']?(.+?)["']?$/m,
+                date: /^date[:：]\s*["']?(.+?)["']?$/m,
+                thanks: /^thanks[:：]\s*["']?(.+?)["']?$/m,
+                theme: /^theme[:：]\s*["']?(.+?)["']?$/m
             };
             for (let [key, regex] of Object.entries(pairs)) {
                 const match = fm.match(regex);
-                if (match) meta[key] = match[1].trim();
+                if (match) meta[key] = this.stripMarkdown(match[1].trim());
             }
         }
         return meta;
     }
 
-    translateToMarp(content) {
+    stripMarkdown(text) {
+        return text.replace(/\*\*(.*?)\*\*/g, '$1')
+            .replace(/\*(.*?)\*/g, '$1')
+            .replace(/__(.*?)__/g, '$1')
+            .replace(/_(.*?)_/g, '$1')
+            .replace(/`(.*?)`/g, '$1')
+            .replace(/\[(.*?)\]\(.*?\)/g, '$1');
+    }
+
+    scanSections(content) {
+        const lines = content.split('\n');
+        const sections = [];
+        // 查找所有二级标题作为目录项
+        const r2Regex = /^[ \t]*##[ \t]+(.+)$/;
+        lines.forEach(line => {
+            const match = line.match(r2Regex);
+            if (match) {
+                sections.push(this.stripMarkdown(match[1].trim()));
+            }
+        });
+        return sections;
+    }
+
+    translateToMarp(content, applyTOC = false) {
         // 1. 分离 Frontmatter 和 正文
         let frontmatter = "";
         let body = content;
@@ -102,7 +130,6 @@ class DaMiaooCompiler {
 
         if (fmMatch) {
             const rawFm = fmMatch[1];
-            // 过滤：仅保留 Marp 需要的指令，移除自定义标签防止其渲染
             const marpDirectives = ['marp', 'theme', 'paginate', 'footer', 'header', 'size', 'style', 'backgroundColor'];
             const filteredFm = rawFm.split('\n').filter(line => {
                 const key = line.split(':')[0].trim();
@@ -113,13 +140,23 @@ class DaMiaooCompiler {
             body = content.replace(fmMatch[0], '').trim();
         }
 
-        // 2. 处理正文每一页
-        const slides = body.split(/^---\s*$/gm);
+        // 2. 预检测：搜寻目录意图（同时检测原始标签和已转换的 Marp 指令）
+        let hasTOC = body.includes('@[toc]') || body.includes('_class: toc') || /^\s*#+\s+(目录|TOC|Table of Contents|Contents)\s*$/mi.test(body);
+
+        // 3. 处理正文每一页
+        let slides = body.split(/^---\s*$/gm);
+
+        // 如果全文无目录，且不是第一遍扫描，则在封面后注入一个
+        if (!hasTOC && applyTOC) {
+            // 找到封面位置 (通常是第一个 slide)
+            slides.splice(1, 0, "@[toc]");
+        }
+
         const translatedSlides = slides.map(slide => {
             let processed = slide.trim();
             if (!processed) return "";
 
-            // A. 处理封面/封底 (系统指令，强制触发封面布局)
+            // A. 处理封面/封底
             const systemMatch = processed.match(/^[ \t]*@\[(front|back)\][ \t]*$/m);
             if (systemMatch) {
                 const type = systemMatch[1];
@@ -130,25 +167,47 @@ class DaMiaooCompiler {
                 const date = this.meta.date || '';
                 const thanks = (this.meta.thanks || '感谢您的观看').replace(/\\\\/g, '<br>');
 
-                // 智能元数据补全
                 if (!processed.match(/^#\s+/m)) {
                     processed = `# ${type === 'front' ? title : thanks}\n${processed}`;
                 }
-                if (type === 'front' && !processed.match(/^##\s+/m)) {
-                    processed += `\n\n## ${author}\n### ${date}`;
+                if (type === 'front' && !processed.match(/^##\s+/m) && author && author !== 'DaMiaoo') {
+                    let subtitle = `\n\n## ${author}`;
+                    if (date) subtitle += `\n### ${date}`;
+                    processed += subtitle;
                 }
 
                 return `<!-- _class: cover -->\n\n${processed}`;
             }
 
-            // B. 处理通用布局标签 (通过 replace 归一化为 Marp 指令)
-            processed = processed.replace(/^[ \t]*@\[([a-zA-Z0-9-]+)(?::(\d+))?\][ \t]*$/gm, (match, layout, param) => {
-                let directive = `<!-- _class: ${layout} -->`;
-                if (layout === 'toc' && param !== undefined) {
-                    // [优化] 使用 Marp 内联样式指令而非原始 HTML 标签，使中间件更整洁
-                    directive += `\n<!-- _style: "section.toc :is(ul, ol) { counter-reset: toc-counter ${param}; }" -->`;
+            // B. 处理 [toc] 标签及其自动化内容
+            if (processed.includes('@[toc]')) {
+                const hasList = processed.match(/^\s*([-*+]|\d+[\.\)])\s+/m);
+                
+                // 1. [补齐标题]：如果用户没写标题，JS 才帮他补上
+                if (!processed.match(/^[ \t]*#\s+/m)) {
+                    processed = `# 目录\n\n${processed}`;
                 }
-                return directive;
+
+                // 2. [补齐列表]：如果 Preprocessor 没填，这里补上（手动目录不会进这里）
+                if (!hasList && applyTOC && this.sections.length > 0) {
+                    const tocList = this.sections.map((s, i) => `${i + 1}. ${s}`).join('\n');
+                    processed += `\n\n${tocList}`;
+                }
+
+                // 3. [转换标签]
+                processed = processed.replace(/^[ \t]*@\[toc(?:[:：](\d+))?\][ \t]*$/gm, (match, param) => {
+                    let directive = `<!-- _class: toc -->`;
+                    if (param !== undefined) {
+                        directive += `\n<!-- _style: "section.toc :is(ul, ol) { counter-reset: toc-counter ${param}; }" -->`;
+                    }
+                    return directive;
+                });
+            }
+
+            // C. 处理其余通用布局标签
+            processed = processed.replace(/^[ \t]*@\[([a-zA-Z0-9-]+)(?::(\d+))?\][ \t]*$/gm, (match, layout, param) => {
+                if (layout === 'toc') return match; // 已处理
+                return `<!-- _class: ${layout} -->`;
             });
 
             return processed;
